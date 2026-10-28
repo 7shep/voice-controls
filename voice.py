@@ -34,6 +34,7 @@ FRAME = RATE * FRAME_MS // 1000  # samples per VAD frame
 GATE_S = 3                        # seconds transcribed to look for the wake phrase
 PHRASE_GAP_MS = 300               # a pause this long starts a new phrase, which is checked for the wake phrase
 MIN_VOICED = 12                   # phrases with less speech than this (~0.36 s) are not checked
+STALL_S = 3                       # no mic audio (or only exact zeros) for this long reopens the mic
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # keep child processes from stealing focus on Windows
 PID_FILE = os.path.join(HERE, "voice.pid")
 
@@ -298,19 +299,34 @@ def resolve_device(spec):
     raise SystemExit("No input device matching %r (try --list-devices)" % spec)
 
 
-def mic_frames(cfg):
-    """Yields 30 ms frames of 16 kHz mono int16 PCM from the mic, forever."""
-    import sounddevice as sd
-    frames = queue.Queue()
+def mic_frames(cfg, open_stream=None):
+    """Yields 30 ms frames of 16 kHz mono int16 PCM from the mic, forever. Some mics (a Bluetooth controller's
+    headset mic, for one) stop delivering audio to a long-lived stream while a fresh one still works, so the stream
+    is reopened whenever frames stop arriving for STALL_S or arrive as pure digital silence for that long."""
+    if open_stream is None:
+        import sounddevice as sd
 
-    def callback(indata, n, t, status):
-        frames.put(bytes(indata))
-
-    with sd.RawInputStream(samplerate=RATE, blocksize=FRAME, channels=1, dtype="int16",
-                           device=resolve_device(cfg["input_device"]), callback=callback):
-        print("listening. Say \"hey claude, ...\" (Ctrl+C to stop)")
-        while True:
-            yield frames.get()
+        def open_stream(callback):
+            return sd.RawInputStream(samplerate=RATE, blocksize=FRAME, channels=1, dtype="int16",
+                                     device=resolve_device(cfg["input_device"]), callback=callback)
+    zero = bytes(FRAME * 2)
+    stall_frames = STALL_S * 1000 // FRAME_MS
+    first = True
+    while True:
+        frames = queue.Queue()
+        with open_stream(lambda indata, n, t, status: frames.put(bytes(indata))):
+            if first:
+                print("listening. Say \"hey claude, ...\" (Ctrl+C to stop)")
+                first = False
+            silent = 0
+            while silent < stall_frames:
+                try:
+                    f = frames.get(timeout=STALL_S)
+                except queue.Empty:
+                    break
+                silent = silent + 1 if f == zero else 0
+                yield f
+        log.warning("mic stopped sending audio; reopening it")
 
 
 def phrases(frames, cfg):

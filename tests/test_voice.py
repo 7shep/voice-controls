@@ -90,5 +90,42 @@ class HandlerTest(unittest.TestCase):
         self.assertIsNone(h.text("nice shot"))  # the window closed after the request
 
 
+class MicTest(unittest.TestCase):
+    def frames_from(self, streams, n):
+        """The first n frames mic_frames yields when each opened stream delivers the next list of frames, then stops."""
+        opened = []
+
+        class Stream:
+            def __init__(self, callback):
+                self.callback = callback
+
+            def __enter__(self):
+                for f in streams[len(opened)]:
+                    self.callback(f, voice.FRAME, None, None)
+                opened.append(self)
+
+            def __exit__(self, *exc):
+                return False
+
+        old = voice.STALL_S
+        voice.STALL_S = 0.1  # 3 frames, and a 0.1 s wait for audio
+        try:
+            gen = voice.mic_frames(None, open_stream=Stream)
+            return [next(gen) for _ in range(n)], len(opened)
+        finally:
+            voice.STALL_S = old
+
+    def test_reopens_a_stream_that_stops_sending(self):
+        a, b = b"\x01" * voice.FRAME * 2, b"\x02" * voice.FRAME * 2
+        got, opened = self.frames_from([[a], [b]], 2)
+        self.assertEqual((got, opened), ([a, b], 2))
+
+    def test_reopens_a_stream_of_digital_silence(self):
+        zero, b = bytes(voice.FRAME * 2), b"\x02" * voice.FRAME * 2
+        got, opened = self.frames_from([[zero] * 10, [b]], 4)
+        self.assertEqual((got[-1], opened), (b, 2))
+        self.assertEqual(got[:3], [zero] * 3)
+
+
 if __name__ == "__main__":
     unittest.main()
