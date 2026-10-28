@@ -81,3 +81,7 @@ py -m unittest discover -s tests                                             # p
 - **Open mic in Discord:** your squad hears you say "hey claude".
 - Agents use your normal Claude Code permissions and can edit files and run commands, the same as if you'd typed the prompt.
 - Requests and agent IDs are logged to `voice.log` (ignored by Git). Speech without the wake phrase is never logged.
+
+## License
+
+[MIT](LICENSE)
