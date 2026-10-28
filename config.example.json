@@ -1,6 +1,7 @@
 {
   "input_device": null,
   "whisper_model": "base.en",
-  "allowed_tools": ["Read", "Glob", "Grep", "WebSearch", "WebFetch"],
+  "permission_mode": null,
+  "open_terminal": true,
   "speak": true
 }

@@ -45,6 +45,20 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(voice.route("summarize today's inbox"), ("claude", "summarize today's inbox", False))
 
 
+class AgentTest(unittest.TestCase):
+    def test_name_from_first_words(self):
+        self.assertEqual(voice.agent_name("check the build and fix any failing tests please."),
+                         "voice: check the build and fix any")
+        self.assertEqual(voice.spoken("voice: check the build"), "check the build")
+        self.assertEqual(voice.spoken("Morning brief"), "Morning brief")
+
+    def test_parse_backgrounded(self):
+        out = "Starting background service…\nbackgrounded · d50e5122 · voice: check the build\n  claude agents  list"
+        self.assertEqual(voice.parse_backgrounded(out), ("d50e5122", "voice: check the build"))
+        self.assertEqual(voice.parse_backgrounded("backgrounded · 0ab46a06\n  claude agents"), ("0ab46a06", ""))
+        self.assertIsNone(voice.parse_backgrounded("error: not logged in"))
+
+
 class InboxTest(unittest.TestCase):
     def test_appends_in_brain_format(self):
         with tempfile.TemporaryDirectory() as d:
