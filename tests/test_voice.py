@@ -52,12 +52,6 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(voice.spoken("voice: check the build"), "check the build")
         self.assertEqual(voice.spoken("Morning brief"), "Morning brief")
 
-    def test_parse_backgrounded(self):
-        out = "Starting background service…\nbackgrounded · d50e5122 · voice: check the build\n  claude agents  list"
-        self.assertEqual(voice.parse_backgrounded(out), ("d50e5122", "voice: check the build"))
-        self.assertEqual(voice.parse_backgrounded("backgrounded · 0ab46a06\n  claude agents"), ("0ab46a06", ""))
-        self.assertIsNone(voice.parse_backgrounded("error: not logged in"))
-
 
 class InboxTest(unittest.TestCase):
     def test_appends_inbox_lines(self):

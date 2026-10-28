@@ -5,9 +5,9 @@ Listens on the mic, cuts speech into utterances with WebRTC VAD, transcribes eac
 faster-whisper, and acts only on utterances that start with the wake phrase:
   "hey claude, note/idea/todo ..."  -> appended to a markdown inbox
   "hey claude, also ..."            -> continues the last voice agent
-  "hey claude, <anything else>"     -> a new Claude Code background agent (claude --bg)
-Agents show up in `claude agents`; when no interactive Claude terminal is open, one opens on the agent view,
-minimised and without taking focus. A spoken line says when an agent finishes or is waiting on you.
+  "hey claude, <anything else>"     -> a new headless Claude Code agent (claude -p)
+Agents run with no window, so nothing takes focus from your game; each one's short summary is read aloud when it
+finishes.
 Saying just "hey claude" chimes and treats the next utterance (within a few seconds) as the request.
 
 Run: python voice.py [--config config.json] [--list-devices] [--text "..."] [--wav file.wav] [--dry-run] [--stop]
@@ -49,17 +49,16 @@ DEFAULTS = {
     "follow_window_s": 8,          # after a bare "hey claude", how long to wait for the request
     "inbox": None,                 # markdown file for note/idea/todo; None = inbox.md next to this script
     "claude_cwd": None,            # folder agents start in; None = your home folder
-    "permission_mode": None,       # None = your normal Claude Code setting
-    "open_terminal": True,         # open the agent view when no interactive Claude terminal is running
-    "poll_s": 15,                  # how often to check on running voice agents
+    "permission_mode": "auto",     # agents can't ask you, so auto mode's checks approve or block each action
+    "agent_timeout_s": 1800,
     "speak": True,
     "max_spoken_chars": 400,
 }
 
-VOICE_NOTE = ("This task was dictated by voice and transcribed automatically, so words may be misheard. "
-              "If the request is ambiguous or something looks like a transcription error, ask before acting on a guess.")
-TERMINAL_TITLE = "Claude voice agents"
-BACKGROUNDED = re.compile(r"backgrounded[^\w\n]+([0-9a-f]+)(?:[^\w\n]+(.+))?")
+VOICE_NOTE = ("This task was dictated by voice and transcribed automatically, so words may be misheard. If the request "
+              "is ambiguous or looks like a transcription error, don't act on a guess: say what you need instead. "
+              "Nobody is watching the screen, and your final reply is read aloud by text-to-speech, so make it one or "
+              "two short plain sentences saying what you did, with no markdown, code, lists or URLs.")
 
 WAKE = re.compile(r"\b(?:hey|hi|okay|ok|a)[\s,.!?-]+(?:claude|claud|clawed|cloud|clod|clyde|claudia)\b[\s,.!?:;-]*", re.I)
 CAPTURE = re.compile(r"^(?:(?:take|make|add)\s+an?\s+)?(note|idea|to[\s-]?do)\b[\s,.:;-]*(?:that\s+)?(.*)$", re.I | re.S)
@@ -170,47 +169,8 @@ def agent_name(prompt):
     return ("voice: " + words)[:50]
 
 
-def parse_backgrounded(output):
-    """(short id, name) from `claude --bg` output ("backgrounded · d50e5122 · name"), or None."""
-    m = BACKGROUNDED.search(output)
-    return (m.group(1), (m.group(2) or "").strip()) if m else None
-
-
 def spoken(name):
     return name[len("voice: "):] if name.startswith("voice: ") else name
-
-
-def user_busy():
-    """True while a fullscreen game or presentation is in front: Windows' own do-not-disturb check, plus a
-    foreground-window-covers-the-monitor check for borderless games it misses."""
-    import ctypes
-    from ctypes import wintypes
-    state = ctypes.c_int()
-    if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) == 0 and state.value in (2, 3, 4):
-        return True  # QUNS_BUSY, QUNS_RUNNING_D3D_FULL_SCREEN, QUNS_PRESENTATION_MODE
-    user32 = ctypes.windll.user32
-    hwnd = user32.GetForegroundWindow()
-    cls = ctypes.create_unicode_buffer(64)
-    if not hwnd or not user32.GetClassNameW(hwnd, cls, 64) or cls.value in ("Progman", "WorkerW"):  # the desktop
-        return False
-
-    class MONITORINFO(ctypes.Structure):
-        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
-                    ("dwFlags", wintypes.DWORD)]
-    rect, info = wintypes.RECT(), MONITORINFO()
-    info.cbSize = ctypes.sizeof(MONITORINFO)
-    user32.MonitorFromWindow.restype = wintypes.HMONITOR
-    monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
-    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)) or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
-        return False
-    m = info.rcMonitor
-    return (rect.left, rect.top, rect.right, rect.bottom) == (m.left, m.top, m.right, m.bottom)
-
-
-def terminal_open():
-    """Whether the agent view this tool opens (titled TERMINAL_TITLE) is still on screen."""
-    import ctypes
-    return bool(ctypes.windll.user32.FindWindowW(None, TERMINAL_TITLE))
 
 
 def claude_exe():
@@ -221,120 +181,58 @@ def claude_exe():
 
 
 class Agents:
-    """Starts voice requests as Claude Code background agents, opens the agent view when no Claude terminal is open,
-    and says when a voice agent finishes or is waiting on you."""
+    """Runs each voice request as a headless Claude Code agent (claude -p) with no window, several at once if you
+    ask for several, and reads out each agent's short summary when it finishes."""
 
     def __init__(self, cfg, speaker):
-        self.cfg, self.speaker, self.q = cfg, speaker, queue.Queue()
-        self.last = None        # short id of the most recent voice agent, for "also ..."
-        self.watched = {}       # short id -> [name, last state seen]
-        self.terminal_pending = False  # an agent view is queued to open once you leave a fullscreen game
+        self.cfg, self.speaker = cfg, speaker
+        self.last = None          # session id of the most recent voice agent, for "also ..."
+        self.last_thread = None
+        self.threads = []
         self.lock = threading.Lock()
-        threading.Thread(target=self._run, daemon=True).start()
-        threading.Thread(target=self._watch, daemon=True).start()
 
     def submit(self, prompt, follow_up):
-        self.q.put((prompt, follow_up))
+        previous = self.last_thread if follow_up else None
+        t = threading.Thread(target=self._run, args=(prompt, follow_up, previous), daemon=True)
+        self.threads.append(t)
+        self.last_thread = t
+        t.start()
 
-    def claude(self, args, timeout=60):
-        out = subprocess.run([claude_exe()] + args, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                             cwd=self.cfg["claude_cwd"], timeout=timeout, creationflags=NO_WINDOW)
-        if out.returncode:
-            raise RuntimeError((out.stderr or out.stdout or "exit %d" % out.returncode).strip()[:200])
-        return out.stdout
+    def wait(self):
+        for t in list(self.threads):
+            t.join()
 
-    def sessions(self):
-        return json.loads(self.claude(["agents", "--json", "--all"]))
+    def _run(self, prompt, follow_up, previous):
+        if previous:
+            previous.join()  # "also ..." continues the last agent, so let it finish first
+        try:
+            session, reply = self.ask(prompt, self.last if follow_up else None)
+            with self.lock:
+                self.last = session or self.last
+            log.info("agent %s finished: %s", session, reply)
+            self.speaker.say(reply)
+        except Exception as e:
+            log.exception("agent failed: %s", prompt)
+            chime(*ERROR_TONE)
+            self.speaker.say("%s failed: %s" % (spoken(agent_name(prompt)), e))
 
-    def _run(self):
-        while True:
-            prompt, follow_up = self.q.get()
-            try:
-                self.speaker.say("Continuing the agent." if self.launch(prompt, follow_up) else "Agent started.")
-                self.ensure_terminal()
-            except Exception as e:
-                log.exception("agent launch failed")
-                chime(*ERROR_TONE)
-                self.speaker.say("Couldn't start the agent: %s" % e)
-            self.q.task_done()
-
-    def launch(self, prompt, follow_up):
-        """Starts the agent; True when it continued the previous voice agent rather than starting fresh."""
-        args = ["--bg", "--append-system-prompt", VOICE_NOTE]
+    def ask(self, prompt, resume):
+        """(session id, final reply) from one headless run; resume continues that session."""
+        args = ["-p", "--output-format", "json", "--append-system-prompt", VOICE_NOTE, "--permission-prompts", "none"]
         if self.cfg["permission_mode"]:
             args += ["--permission-mode", self.cfg["permission_mode"]]
-        previous = self.find(self.last) if follow_up and self.last else None
-        if previous:
-            if previous.get("state") == "done":  # an idle finished agent; stop it so --resume continues it in place
-                self.claude(["stop", self.last])
-            args += ["--resume", previous["sessionId"]]
-        else:
-            args += ["-n", agent_name(prompt)]
-        parsed = parse_backgrounded(self.claude(args + [prompt]))
-        if not parsed:
-            raise RuntimeError("claude didn't report a background session")
-        short, name = parsed
-        name = name or (previous or {}).get("name") or agent_name(prompt)
-        with self.lock:
-            self.watched[short] = [name, None]
-            self.last = short
-        log.info("agent %s: %s", short, name)
-        return bool(previous)
-
-    def find(self, short):
-        return next((s for s in self.sessions() if s.get("id") == short), None)
-
-    def ensure_terminal(self):
-        if not self.cfg["open_terminal"] or os.name != "nt" or self.terminal_pending or not self.needs_terminal():
-            return
-        self.terminal_pending = True
-        threading.Thread(target=self._open_terminal, daemon=True).start()
-
-    def needs_terminal(self):
-        return not terminal_open() and not any(s.get("kind") == "interactive" for s in self.sessions())
-
-    def _open_terminal(self):
-        """Opens the agent view, waiting until you leave a fullscreen game: any new window would take focus."""
+        if resume:
+            args += ["--resume", resume]
+        out = subprocess.run([claude_exe()] + args, input=prompt, capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", cwd=self.cfg["claude_cwd"], timeout=self.cfg["agent_timeout_s"],
+                             creationflags=NO_WINDOW)
         try:
-            while user_busy():
-                time.sleep(2)
-            if self.needs_terminal():
-                wt = shutil.which("wt")
-                if wt:
-                    subprocess.Popen([wt, "-w", "new", "new-tab", "--title", TERMINAL_TITLE, "--suppressApplicationTitle",
-                                      claude_exe(), "agents"], cwd=self.cfg["claude_cwd"], creationflags=NO_WINDOW)
-                else:
-                    subprocess.Popen([claude_exe(), "agents"], cwd=self.cfg["claude_cwd"],
-                                     creationflags=subprocess.CREATE_NEW_CONSOLE)
-        except Exception:
-            log.exception("couldn't open the agent view")
-        self.terminal_pending = False
-
-    def _watch(self):
-        while True:
-            time.sleep(self.cfg["poll_s"])
-            with self.lock:
-                if not self.watched:
-                    continue
-            try:
-                states = {s.get("id"): s.get("state") for s in self.sessions()}
-            except Exception:
-                log.exception("agent poll failed")
-                continue
-            with self.lock:
-                for short, entry in list(self.watched.items()):
-                    state = states.get(short, "gone")
-                    if state == entry[1]:
-                        continue
-                    entry[1] = state
-                    if state == "done":
-                        self.speaker.say("%s is done." % spoken(entry[0]))
-                    elif state == "blocked":
-                        self.speaker.say("%s needs you." % spoken(entry[0]))
-                    elif state in ("failed", "error"):
-                        self.speaker.say("%s stopped with an error." % spoken(entry[0]))
-                    if state in ("done", "failed", "error", "stopped", "gone"):
-                        del self.watched[short]
+            data = json.loads(out.stdout)
+        except ValueError:
+            raise RuntimeError((out.stderr or out.stdout or "no output").strip()[:200])
+        if data.get("is_error"):
+            raise RuntimeError(str(data.get("result") or data.get("subtype") or "unknown error")[:200])
+        return data.get("session_id"), str(data.get("result") or "Done.").strip()
 
 
 class Handler:
@@ -532,8 +430,8 @@ def main():
         print("transcript:", transcript)
         if handler.text(transcript) is None:
             print("(not addressed to Claude)")
-        if not args.dry_run:  # let the agent launch and its spoken confirmation finish before exiting
-            handler.agents.q.join()
+        if not args.dry_run:  # let the agent finish and its summary be spoken before exiting
+            handler.agents.wait()
             handler.speaker.q.join()
         return
 

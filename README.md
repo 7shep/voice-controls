@@ -2,11 +2,11 @@
 
 **Say "Hey Claude, …" and a [Claude Code](https://claude.com/claude-code) agent starts working, without alt-tabbing out of your game or walking back to your desk.**
 
-I wanted to hand off tasks while mid-match, or from across the room with headphones in. This listens on your mic, picks out requests that start with "Hey Claude", and starts each one as a Claude Code background agent. It tells you out loud when the agent is done or needs you.
+I wanted to hand off tasks while mid-match, or from across the room with headphones in. This listens on your mic, picks out requests that start with "Hey Claude", and runs each one as a headless Claude Code agent. When the agent finishes, it reads you a one-sentence summary of what it did.
 
 | You say | What happens |
 | --- | --- |
-| "Hey Claude, …" | A new Claude Code background agent (`claude --bg`) starts with that prompt |
+| "Hey Claude, …" | A headless Claude Code agent (`claude -p`) runs that prompt with no window |
 | "Hey Claude, also …" | Continues the last voice agent, with its conversation |
 | "Hey Claude, note / idea / to-do …" or "remind me to …" | Appended to a markdown inbox file |
 | "Hey Claude." *(pause)* | Chime, then your next sentence (within 8 s) is the request |
@@ -14,20 +14,20 @@ I wanted to hand off tasks while mid-match, or from across the room with headpho
 ## How it works
 
 ```
-mic ─► WebRTC VAD ─► first 3 s through Whisper: "hey claude"? ─► full transcript ─► claude --bg "<request>"
+mic ─► WebRTC VAD ─► first 3 s through Whisper: "hey claude"? ─► full transcript ─► claude -p "<request>"
           │                         │ no                                                │
-     30 ms frames,               dropped, never logged                    spoken updates when the agent
-     ~0.2% of a core                                                      is done or waiting on you
+     30 ms frames,               dropped, never logged                    one-sentence summary read aloud
+     ~0.2% of a core                                                      when the agent finishes
 ```
 
 - **Local speech recognition.** [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`base.en`, int8, 2 CPU threads) runs on the CPU, so the GPU stays with the game. Audio never leaves your machine; only the request text goes to Claude.
 - **Cheap when idle.** Voice-activity detection runs on 30 ms frames and splits speech into phrases at short pauses. Whisper checks only the first 3 seconds of each phrase for the wake phrase, and transcribes the whole request only after hearing it.
-- **Doesn't break your game.** Agents are ordinary background sessions: `claude agents` lists them and `claude attach <id>` opens one. If no interactive Claude terminal is open, a Windows Terminal window opens on the agent view. While a fullscreen game is in front, it waits and opens when you leave the game, because any new window would take focus.
+- **Doesn't break your game.** Agents run headless with no window, so nothing takes focus. You can run several at once. Each session is saved, so `claude --resume` opens one later if you want the details.
 - **Tolerates mishearings.** "Hey cloud" and "hey clawed" count as the wake phrase. Agents are told the request was dictated, so they ask instead of guessing at a misheard word.
 
 ## Requirements
 
-- Windows 10/11 (the terminal, fullscreen detection, chimes and speech use Windows APIs)
+- Windows 10/11 (the chimes and speech use Windows APIs)
 - Python 3.9+
 - [Claude Code](https://claude.com/claude-code), installed and logged in (`claude` on PATH)
 - A microphone
@@ -54,11 +54,11 @@ The first run downloads the Whisper model (~150 MB). Only one listener runs at a
 - `claude_cwd`: the folder agents start in, usually your main project. Defaults to your home folder.
 - `inbox`: the markdown file for note/idea/to-do captures. Defaults to `inbox.md` next to `voice.py`.
 - `input_device`: device index or name substring, such as `"Headset"`. Defaults to the system mic.
-- `permission_mode`: passed to agents, such as `"acceptEdits"`. Defaults to your normal Claude Code setting.
+- `permission_mode`: defaults to `"auto"`. A headless agent can't ask you for approval, so auto mode's safety checks approve or block each action, and anything that would need a prompt is refused. Use `"acceptEdits"` to allow file edits only, or `null` for your normal setting (headless, that usually means read-only).
 - `whisper_model`: `tiny.en` is lighter, `small.en` is more accurate. `whisper_threads` caps CPU use.
-- `open_terminal`: set to `false` to never open the agent view.
+- `agent_timeout_s`: how long an agent may run. Defaults to 30 minutes.
 - `vad_aggressiveness`: 0–3, default 3. Lower it if quiet speech is missed.
-- `speak`, `poll_s`, `silence_ms`, `follow_window_s`: see `voice.py`.
+- `speak`, `silence_ms`, `follow_window_s`: see `voice.py`.
 
 ### Using it with Brain
 
@@ -80,7 +80,7 @@ py -m unittest discover -s tests                                             # p
 
 - **Bluetooth headphones:** while any app holds a Bluetooth headset's mic open, Windows switches it to the Hands-Free profile, and game audio drops to low-quality mono. With this always listening, that's all the time. Use a separate mic or a 2.4 GHz dongle if you can.
 - **Open mic in Discord:** your squad hears you say "hey claude".
-- Agents use your normal Claude Code permissions and can edit files and run commands, the same as if you'd typed the prompt.
+- Agents can edit files and run commands in `claude_cwd`, within what auto mode allows. Point `claude_cwd` at a project you're happy to let a voice request change.
 - Requests and agent IDs are logged to `voice.log` (ignored by Git). Speech without the wake phrase is never logged.
 
 ## License
