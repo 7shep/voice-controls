@@ -32,6 +32,8 @@ RATE = 16000
 FRAME_MS = 30
 FRAME = RATE * FRAME_MS // 1000  # samples per VAD frame
 GATE_S = 3                        # seconds transcribed to look for the wake phrase
+PHRASE_GAP_MS = 300               # a pause this long starts a new phrase, which is checked for the wake phrase
+MIN_VOICED = 12                   # phrases with less speech than this (~0.36 s) are not checked
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # keep child processes from stealing focus on Windows
 PID_FILE = os.path.join(HERE, "voice.pid")
 
@@ -41,7 +43,7 @@ DEFAULTS = {
     "whisper_device": "cpu",       # cpu keeps the GPU free for the game
     "whisper_compute": "int8",
     "whisper_threads": 2,          # leave the other cores to the game
-    "vad_aggressiveness": 2,       # 0-3, higher ignores more non-speech
+    "vad_aggressiveness": 3,       # 0-3, higher ignores more non-speech (2 hears a quiet room as speech)
     "silence_ms": 900,             # this much silence ends an utterance
     "max_utterance_s": 30,
     "follow_window_s": 8,          # after a bare "hey claude", how long to wait for the request
@@ -398,17 +400,10 @@ def resolve_device(spec):
     raise SystemExit("No input device matching %r (try --list-devices)" % spec)
 
 
-def utterances(cfg):
-    """Yields raw 16 kHz mono int16 PCM for each stretch of speech."""
+def mic_frames(cfg):
+    """Yields 30 ms frames of 16 kHz mono int16 PCM from the mic, forever."""
     import sounddevice as sd
-    import webrtcvad
-    vad = webrtcvad.Vad(cfg["vad_aggressiveness"])
     frames = queue.Queue()
-    pre = collections.deque(maxlen=10)    # 300 ms of audio kept from before speech starts
-    recent = collections.deque(maxlen=10)
-    end_frames = cfg["silence_ms"] // FRAME_MS
-    max_frames = cfg["max_utterance_s"] * 1000 // FRAME_MS
-    buf, silent = None, 0
 
     def callback(indata, n, t, status):
         frames.put(bytes(indata))
@@ -417,22 +412,57 @@ def utterances(cfg):
                            device=resolve_device(cfg["input_device"]), callback=callback):
         print("listening. Say \"hey claude, ...\" (Ctrl+C to stop)")
         while True:
-            f = frames.get()
-            speech = vad.is_speech(f, RATE)
-            if buf is None:
-                pre.append(f)
-                recent.append(speech)
-                if sum(recent) >= 6:
-                    buf, silent = list(pre), 0
-                    recent.clear()
-                continue
-            buf.append(f)
-            silent = 0 if speech else silent + 1
-            if silent >= end_frames or len(buf) >= max_frames:
-                if len(buf) - silent > 13:  # ignore blips under ~0.4 s of speech
-                    yield b"".join(buf)
-                buf = None
-                pre.clear()
+            yield frames.get()
+
+
+def phrases(frames, cfg):
+    """Splits frames into phrases at short pauses: yields (pcm, voiced frames, ended). ended is True when the pause
+    reached silence_ms (or the utterance hit max_utterance_s), closing the utterance the phrase belongs to."""
+    import webrtcvad
+    vad = webrtcvad.Vad(cfg["vad_aggressiveness"])
+    pre = collections.deque(maxlen=10)    # 300 ms of audio kept from before speech starts
+    recent = collections.deque(maxlen=10)
+    gap_frames = PHRASE_GAP_MS // FRAME_MS
+    end_frames = cfg["silence_ms"] // FRAME_MS
+    max_frames = cfg["max_utterance_s"] * 1000 // FRAME_MS
+    buf, silent, voiced, total = None, 0, 0, 0
+    for f in frames:
+        speech = vad.is_speech(f, RATE)
+        if buf is None:
+            pre.append(f)
+            recent.append(speech)
+            if sum(recent) >= 6:
+                buf, silent, voiced, total = list(pre), 0, sum(recent), len(pre)
+                recent.clear()
+            continue
+        buf.append(f)
+        total += 1
+        silent = 0 if speech else silent + 1
+        voiced += speech
+        if silent >= end_frames or total >= max_frames:
+            yield b"".join(buf), voiced, True
+            buf = None
+            pre.clear()
+        elif silent == gap_frames:
+            yield b"".join(buf), voiced, False
+            buf, voiced = [], 0
+
+
+def listen(model, handler, stream):
+    """Checks the start of each phrase for the wake phrase (cheap: at most GATE_S of audio), then transcribes the
+    whole request, from that phrase to the end of the utterance, in one go."""
+    request = []
+    for pcm, voiced, ended in stream:
+        if request:
+            request.append(pcm)
+        elif voiced >= MIN_VOICED and (handler.expecting() or
+                                       parse_wake(transcribe(model, pcm[:RATE * 2 * GATE_S])) is not None):
+            request = [pcm]
+        if request and ended:
+            transcript = transcribe(model, b"".join(request))
+            request = []
+            if transcript:
+                handler.text(transcript)
 
 
 def read_wav(path):
@@ -515,13 +545,7 @@ def main():
         f.write(str(os.getpid()))
     model = load_whisper(cfg)
     try:
-        for pcm in utterances(cfg):
-            head = pcm[:RATE * 2 * GATE_S]  # the wake phrase opens the utterance, so check there before paying for the rest
-            if len(pcm) > len(head) and not handler.expecting() and parse_wake(transcribe(model, head)) is None:
-                continue
-            transcript = transcribe(model, pcm)
-            if transcript:
-                handler.text(transcript)
+        listen(model, handler, phrases(mic_frames(cfg), cfg))
     except KeyboardInterrupt:
         pass
     except Exception:

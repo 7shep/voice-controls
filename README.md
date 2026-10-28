@@ -21,7 +21,7 @@ mic ─► WebRTC VAD ─► first 3 s through Whisper: "hey claude"? ─► ful
 ```
 
 - **Local speech recognition.** [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`base.en`, int8, 2 CPU threads) runs on the CPU, so the GPU stays with the game. Audio never leaves your machine; only the request text goes to Claude.
-- **Cheap when idle.** Voice-activity detection runs on 30 ms frames. Whisper runs only when someone speaks, and only on the first 3 seconds unless they start with the wake phrase. Long voice-chat callouts cost about 1 s of transcription instead of about 6.
+- **Cheap when idle.** Voice-activity detection runs on 30 ms frames and splits speech into phrases at short pauses. Whisper checks only the first 3 seconds of each phrase for the wake phrase, and transcribes the whole request only after hearing it.
 - **Doesn't break your game.** Agents are ordinary background sessions: `claude agents` lists them and `claude attach <id>` opens one. If no interactive Claude terminal is open, a Windows Terminal window opens on the agent view. While a fullscreen game is in front, it waits and opens when you leave the game, because any new window would take focus.
 - **Tolerates mishearings.** "Hey cloud" and "hey clawed" count as the wake phrase. Agents are told the request was dictated, so they ask instead of guessing at a misheard word.
 
@@ -57,7 +57,8 @@ The first run downloads the Whisper model (~150 MB). Only one listener runs at a
 - `permission_mode`: passed to agents, such as `"acceptEdits"`. Defaults to your normal Claude Code setting.
 - `whisper_model`: `tiny.en` is lighter, `small.en` is more accurate. `whisper_threads` caps CPU use.
 - `open_terminal`: set to `false` to never open the agent view.
-- `speak`, `poll_s`, `silence_ms`, `vad_aggressiveness`, `follow_window_s`: see `voice.py`.
+- `vad_aggressiveness`: 0–3, default 3. Lower it if quiet speech is missed.
+- `speak`, `poll_s`, `silence_ms`, `follow_window_s`: see `voice.py`.
 
 ### Using it with Brain
 
