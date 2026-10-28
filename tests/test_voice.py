@@ -60,15 +60,32 @@ class AgentTest(unittest.TestCase):
 
 
 class InboxTest(unittest.TestCase):
-    def test_appends_in_brain_format(self):
+    def test_appends_inbox_lines(self):
         with tempfile.TemporaryDirectory() as d:
-            voice.append_inbox(d, "note", "first  thing")
-            voice.append_inbox(d, "todo", "second")
-            with open(os.path.join(d, "inbox.md"), encoding="utf-8") as f:
+            path = os.path.join(d, "inbox.md")
+            voice.append_inbox(path, "note", "first  thing")
+            voice.append_inbox(path, "todo", "second")
+            with open(path, encoding="utf-8") as f:
                 lines = f.read().splitlines()
         self.assertEqual(lines[0], "# Inbox")
         self.assertRegex(lines[1], r"^- \d{4}-\d\d-\d\d \d\d:\d\d · note · first thing$")
         self.assertRegex(lines[2], r"· todo · second$")
+
+
+class ConfigTest(unittest.TestCase):
+    def test_defaults_need_nothing_else_installed(self):
+        cfg = voice.load_config(None)
+        self.assertEqual(cfg["inbox"], os.path.join(voice.HERE, "inbox.md"))
+        self.assertEqual(cfg["claude_cwd"], os.path.expanduser("~"))
+
+    def test_config_file_overrides(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "config.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"inbox": "~/notes/inbox.md", "claude_cwd": "%s"}' % d.replace("\\", "/"))
+            cfg = voice.load_config(path)
+        self.assertEqual(cfg["inbox"], os.path.expanduser("~/notes/inbox.md"))
+        self.assertEqual(os.path.normpath(cfg["claude_cwd"]), os.path.normpath(d))
 
 
 class HandlerTest(unittest.TestCase):

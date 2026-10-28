@@ -1,6 +1,8 @@
 {
   "input_device": null,
   "whisper_model": "base.en",
+  "claude_cwd": "~/code/my-project",
+  "inbox": "~/notes/inbox.md",
   "permission_mode": null,
   "open_terminal": true,
   "speak": true

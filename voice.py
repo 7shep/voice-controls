@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Voice controls for Brain: say "Hey Claude, <request>" and it runs without leaving your game.
+"""Voice controls for Claude Code: say "Hey Claude, <request>" and an agent starts without leaving your game.
 
 Listens on the mic, cuts speech into utterances with WebRTC VAD, transcribes each one locally with
 faster-whisper, and acts only on utterances that start with the wake phrase:
-  "hey claude, note/idea/todo ..."  -> appended to the Brain inbox (inbox.md)
+  "hey claude, note/idea/todo ..."  -> appended to a markdown inbox
   "hey claude, also ..."            -> continues the last voice agent
   "hey claude, <anything else>"     -> a new Claude Code background agent (claude --bg)
 Agents show up in `claude agents`; when no interactive Claude terminal is open, one opens on the agent view,
@@ -45,8 +45,8 @@ DEFAULTS = {
     "silence_ms": 900,             # this much silence ends an utterance
     "max_utterance_s": 30,
     "follow_window_s": 8,          # after a bare "hey claude", how long to wait for the request
-    "notes": None,                 # Brain notes root; None = $BRAIN_NOTES or ../personal-notes
-    "claude_cwd": None,            # None = the Brain checkout this folder lives in
+    "inbox": None,                 # markdown file for note/idea/todo; None = inbox.md next to this script
+    "claude_cwd": None,            # folder agents start in; None = your home folder
     "permission_mode": None,       # None = your normal Claude Code setting
     "open_terminal": True,         # open the agent view when no interactive Claude terminal is running
     "poll_s": 15,                  # how often to check on running voice agents
@@ -72,10 +72,8 @@ def load_config(path):
     if path and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             cfg.update(json.load(f))
-    if not cfg["notes"]:
-        cfg["notes"] = os.environ.get("BRAIN_NOTES") or os.path.join(os.path.dirname(HERE), "personal-notes")
-    if not cfg["claude_cwd"]:
-        cfg["claude_cwd"] = os.path.dirname(HERE)
+    cfg["inbox"] = os.path.expanduser(cfg["inbox"] or os.path.join(HERE, "inbox.md"))
+    cfg["claude_cwd"] = os.path.expanduser(cfg["claude_cwd"] or "~")
     return cfg
 
 
@@ -103,9 +101,8 @@ def route(request):
     return ("claude", request, False)
 
 
-def append_inbox(notes, kind, text):
-    """Same line format as Brain's capture palette (see FORMATS.md, inbox.md)."""
-    path = os.path.join(notes, "inbox.md")
+def append_inbox(path, kind, text):
+    """Adds "- 2026-10-28 14:05 · note · text", the line format Brain's inbox.md uses, so it can point at one."""
     text = " ".join(text.split())[:2000]
     current = "# Inbox\n"
     if os.path.exists(path):
@@ -368,7 +365,7 @@ class Handler:
             return action
         chime(*OK_TONE)
         if action[0] == "capture":
-            append_inbox(self.cfg["notes"], action[1], action[2])
+            append_inbox(self.cfg["inbox"], action[1], action[2])
             self.speaker.say("Saved %s." % ("a " + action[1] if action[1] != "idea" else "an idea"))
         else:
             self.agents.submit(action[1], action[2])
