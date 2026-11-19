@@ -52,6 +52,38 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(voice.spoken("voice: check the build"), "check the build")
         self.assertEqual(voice.spoken("Morning brief"), "Morning brief")
 
+    def test_failure_never_reads_the_command_line(self):
+        argv = ["C:/claude.exe", "-p", "--append-system-prompt", voice.VOICE_NOTE]
+        self.assertEqual(voice.failure(voice.subprocess.TimeoutExpired(argv, 1800)), "timed out after 30 minutes")
+        self.assertEqual(voice.failure(voice.subprocess.TimeoutExpired(argv, 60)), "timed out after 1 minute")
+        self.assertEqual(voice.failure(voice.subprocess.TimeoutExpired(argv, 45)), "timed out after 45 seconds")
+        self.assertEqual(voice.failure(RuntimeError("no output")), "failed: no output")
+        self.assertEqual(voice.failure(FileNotFoundError(2, "missing", argv[0])),
+                         "failed with FileNotFoundError, details in voice.log")
+
+    def test_timed_out_agent_says_so(self):
+        said = []
+
+        class Speaker:
+            def say(self, text):
+                said.append(text)
+
+        agents = voice.Agents({"agent_timeout_s": 1800}, Speaker())
+        argv = ["C:/claude.exe", "--append-system-prompt", voice.VOICE_NOTE]
+
+        def ask(prompt, resume):
+            raise voice.subprocess.TimeoutExpired(argv, 1800)
+
+        agents.ask = ask
+        chime, voice.chime = voice.chime, lambda *tones: None
+        try:
+            with self.assertLogs(voice.log, "WARNING") as logs:
+                agents._run("check the build", False, None)
+        finally:
+            voice.chime = chime
+        self.assertEqual(said, ["check the build timed out after 30 minutes"])
+        self.assertNotIn(voice.VOICE_NOTE, "\n".join(logs.output))
+
 
 class InboxTest(unittest.TestCase):
     def test_appends_inbox_lines(self):

@@ -174,6 +174,20 @@ def spoken(name):
     return name[len("voice: "):] if name.startswith("voice: ") else name
 
 
+def failure(e):
+    """What to say when an agent fails. Only our own short RuntimeError messages are read out verbatim; other
+    exceptions (TimeoutExpired's text is the full command line) are summarised and left to voice.log."""
+    if isinstance(e, subprocess.TimeoutExpired):
+        secs = int(e.timeout)
+        if secs < 60:
+            return "timed out after %d second%s" % (secs, "" if secs == 1 else "s")
+        mins = round(secs / 60)
+        return "timed out after %d minute%s" % (mins, "" if mins == 1 else "s")
+    if isinstance(e, RuntimeError):
+        return "failed: %s" % e
+    return "failed with %s, details in voice.log" % type(e).__name__
+
+
 def claude_exe():
     exe = shutil.which("claude") or shutil.which(os.path.expanduser("~/.local/bin/claude"))  # pythonw at sign-in may lack PATH
     if not exe:
@@ -212,10 +226,14 @@ class Agents:
                 self.last = session or self.last
             log.info("agent %s finished: %s", session, reply)
             self.speaker.say(reply)
+        except subprocess.TimeoutExpired as e:  # its str() is the whole argv, system prompt included
+            log.warning("agent timed out after %ss: %s", e.timeout, prompt)
+            chime(*ERROR_TONE)
+            self.speaker.say("%s %s" % (spoken(agent_name(prompt)), failure(e)))
         except Exception as e:
             log.exception("agent failed: %s", prompt)
             chime(*ERROR_TONE)
-            self.speaker.say("%s failed: %s" % (spoken(agent_name(prompt)), e))
+            self.speaker.say("%s %s" % (spoken(agent_name(prompt)), failure(e)))
 
     def ask(self, prompt, resume):
         """(session id, final reply) from one headless run; resume continues that session."""
